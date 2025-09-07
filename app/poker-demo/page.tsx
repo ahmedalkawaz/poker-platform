@@ -9,7 +9,7 @@
 // - Interactive betting controls
 // - Real poker gameplay
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { PokerGameEngine } from '@/lib/game-engine'
 import { GameState, PlayerAction } from '@/lib/types'
 import { PokerTable } from '@/components/PokerTable'
@@ -20,6 +20,7 @@ export default function PokerDemoPage() {
   const [currentPlayerId, setCurrentPlayerId] = useState<string>('alice')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const aiScheduledRef = useRef(false)
 
   // Initialize the game when component mounts
   useEffect(() => {
@@ -39,7 +40,7 @@ export default function PokerDemoPage() {
         },
         {
           id: 'bob', 
-          name: 'Bob (AI)',
+          name: 'Bob',
           chips: 1500,
           position: 1,
           isDealer: false,
@@ -50,7 +51,7 @@ export default function PokerDemoPage() {
         },
         {
           id: 'charlie',
-          name: 'Charlie (AI)',
+          name: 'Charlie',
           chips: 800,
           position: 2,
           isDealer: false,
@@ -67,7 +68,7 @@ export default function PokerDemoPage() {
           isDealer: false,
           isSmallBlind: false,     // ← Added missing property
           isBigBlind: false,       // ← Added missing property
-          isAI: false,
+          isAI: true,
           disconnected: false
         }
       ]
@@ -89,6 +90,18 @@ export default function PokerDemoPage() {
     }
   }, [])
 
+  // Auto-trigger AI whenever the active player is an AI
+  useEffect(() => {
+    if (!gameEngine || !gameState) return
+    const current = gameEngine.getCurrentPlayer()
+    if (current?.isAI && !gameState.isHandComplete && !aiScheduledRef.current) {
+      aiScheduledRef.current = true
+      setTimeout(() => {
+        simulateAIActions()
+      }, 300)
+    }
+  }, [gameEngine, gameState?.activePlayerIndex, gameState?.currentBettingRound])
+
   // Handle player actions
   const handlePlayerAction = (action: PlayerAction) => {
     if (!gameEngine) {
@@ -97,6 +110,11 @@ export default function PokerDemoPage() {
     }
 
     try {
+      // Defensive: ensure it's actually this player's turn
+      if (!gameEngine.canPlayerAct(currentPlayerId)) {
+        console.warn('Ignoring action: not current player turn')
+        return
+      }
       console.log(`🎯 Player ${currentPlayerId} action:`, action)
       
       // Process the action through our game engine
@@ -109,10 +127,7 @@ export default function PokerDemoPage() {
       console.log('✅ Action processed successfully')
       console.log('New Game State:', newGameState)
       
-      // Simple AI simulation for demo purposes
-      setTimeout(() => {
-        simulateAIActions()
-      }, 1000)
+      // AI will be scheduled by effect when it's an AI's turn
       
     } catch (err) {
       console.error('❌ Error processing action:', err)
@@ -122,12 +137,20 @@ export default function PokerDemoPage() {
 
   // Simple AI simulation for demonstration
   const simulateAIActions = () => {
-    if (!gameEngine || !gameState) return
+    if (!gameEngine) return
 
+    const state = gameEngine.getGameState()
     const currentPlayer = gameEngine.getCurrentPlayer()
     
     // Only act if it's an AI player's turn
-    if (!currentPlayer || !currentPlayer.isAI || gameState.isHandComplete) {
+    if (!currentPlayer || !currentPlayer.isAI || state.isHandComplete) {
+      aiScheduledRef.current = false
+      return
+    }
+
+    // Ensure the engine considers this player eligible to act now
+    if (!gameEngine.canPlayerAct(currentPlayer.id)) {
+      aiScheduledRef.current = false
       return
     }
 
@@ -135,6 +158,10 @@ export default function PokerDemoPage() {
 
     // Simple AI logic for demo (real AI would be much more sophisticated)
     const validActions = gameEngine.getValidActions(currentPlayer.id)
+    if (!validActions || validActions.length === 0) {
+      aiScheduledRef.current = false
+      return
+    }
     let aiAction: PlayerAction
 
     // Basic AI strategy:
@@ -144,11 +171,28 @@ export default function PokerDemoPage() {
     // - 10% chance to go all-in (if desperate)
     
     const random = Math.random()
-    const callAmount = Math.max(0, gameState.currentBet - currentPlayer.currentBet)
+    const callAmount = Math.max(0, state.currentBet - currentPlayer.currentBet)
     
     if (validActions.includes('check')) {
-      // If can check, sometimes bet for aggression
-      aiAction = random < 0.7 ? { type: 'check' } : { type: 'bet', amount: gameState.blinds.big * 2 }
+      // If can check, sometimes be aggressive. Use bet only if no outstanding bet; otherwise raise.
+      if (random < 0.7) {
+        aiAction = { type: 'check' }
+      } else {
+        if (state.currentBet === 0 && validActions.includes('bet')) {
+          const openBet = Math.max(state.blinds.big * 2, state.blinds.big)
+          aiAction = { type: 'bet', amount: Math.min(currentPlayer.currentBet + currentPlayer.chips, openBet) }
+        } else if (validActions.includes('raise')) {
+          const minRaiseTotal = state.currentBet + Math.max(state.lastRaiseSize, state.blinds.big)
+          const target = Math.min(currentPlayer.currentBet + currentPlayer.chips, Math.max(minRaiseTotal, state.currentBet * 2))
+          if (target >= minRaiseTotal) {
+            aiAction = { type: 'raise', amount: target }
+          } else {
+            aiAction = { type: 'check' }
+          }
+        } else {
+          aiAction = { type: 'check' }
+        }
+      }
     } else if (validActions.includes('call') && callAmount > 0) {
       if (random < 0.3) {
         aiAction = { type: 'fold' }
@@ -156,9 +200,10 @@ export default function PokerDemoPage() {
         aiAction = { type: 'call' }
       } else {
         // Sometimes raise
-        const raiseAmount = gameState.currentBet * 2
-        if (currentPlayer.chips >= raiseAmount) {
-          aiAction = { type: 'raise', amount: raiseAmount }
+        const minRaiseTotal = state.currentBet + Math.max(state.lastRaiseSize, state.blinds.big)
+        const target = Math.min(currentPlayer.currentBet + currentPlayer.chips, Math.max(minRaiseTotal, state.currentBet * 2))
+        if (currentPlayer.currentBet + currentPlayer.chips >= minRaiseTotal) {
+          aiAction = { type: 'raise', amount: target }
         } else {
           aiAction = { type: 'call' }
         }
@@ -170,20 +215,21 @@ export default function PokerDemoPage() {
 
     console.log(`🤖 AI ${currentPlayer.name} decides to:`, aiAction)
 
-    // Process AI action after a delay
+    // Process AI action after a delay; re-validate turn
     setTimeout(() => {
       try {
+        const stillCurrent = gameEngine.getCurrentPlayer()
+        if (!stillCurrent || stillCurrent.id !== currentPlayer.id) {
+          aiScheduledRef.current = false
+          return
+        }
         gameEngine.processPlayerAction(currentPlayer.id, aiAction)
         const newGameState = gameEngine.getGameState()
         setGameState(newGameState)
-        
-        // Chain AI actions if needed
-        setTimeout(() => {
-          simulateAIActions()
-        }, 1500)
-        
       } catch (err) {
         console.error('AI action failed:', err)
+      } finally {
+        aiScheduledRef.current = false
       }
     }, 2000)
   }

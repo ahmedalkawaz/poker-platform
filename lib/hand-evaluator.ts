@@ -151,10 +151,10 @@ function checkRoyalFlush(cards: Card[]): HandEvaluation | null {
   const isFlush = cards.every(card => card.suit === cards[0].suit)
   if (!isFlush) return null
   
-  const ranks = cards.map(card => card.rank).sort()
-  const royalRanks = ['T', 'J', 'Q', 'K', 'A']
+  const ranksSet = new Set(cards.map(card => card.rank))
+  const royalRanks: Card['rank'][] = ['T', 'J', 'Q', 'K', 'A']
   
-  const isRoyal = ranks.join('') === royalRanks.join('')
+  const isRoyal = royalRanks.every(r => ranksSet.has(r))
   if (!isRoyal) return null
   
   return {
@@ -172,14 +172,13 @@ function checkStraightFlush(cards: Card[]): HandEvaluation | null {
   const straight = checkStraight(cards)
   if (!straight) return null
   
-  // It's a straight flush, but check if it's royal (handled separately)
-  const highCard = rankToValue(cards[cards.length - 1].rank)
-  if (highCard === 14) return null // Royal flush
+  // Derive high card from straight evaluation to handle wheel (A-2-3-4-5) correctly
+  const straightHigh = straight.value - 50000000
   
   return {
     rank: HandRank.STRAIGHT_FLUSH,
-    value: 90000000 + highCard,
-    description: `Straight Flush, ${cards[cards.length - 1].rank} high`,
+    value: 90000000 + straightHigh,
+    description: straight.description.replace('Straight', 'Straight Flush'),
     cards: [...cards]
   }
 }

@@ -86,6 +86,7 @@ export interface GameState {
   communityCards: Card[]
   currentBettingRound: BettingRound
   currentBet: number
+  lastRaiseSize: number
   pot: number
   sidePots: SidePot[]
   blinds: {
