@@ -359,6 +359,9 @@ import {
           player.currentBet = this.gameState.currentBet
           player.totalBet += callAmount
           this.gameState.pot += callAmount
+          if (player.chips === 0) {
+            player.isAllIn = true
+          }
           break
 
         case 'bet':
@@ -369,6 +372,11 @@ import {
           this.gameState.currentBet = action.amount
           this.gameState.pot += betDelta
           this.gameState.lastRaiseSize = action.amount // opening bet sets raise size baseline
+          // Bet opens action again for everyone else
+          this.resetOthersHasActed(player.id)
+          if (player.chips === 0) {
+            player.isAllIn = true
+          }
           break
 
         case 'raise':
@@ -381,6 +389,11 @@ import {
           this.gameState.lastRaiseSize = action.amount - previousHighest
           this.gameState.currentBet = action.amount
           this.gameState.pot += raiseDelta
+          // Raise reopens action for everyone else
+          this.resetOthersHasActed(player.id)
+          if (player.chips === 0) {
+            player.isAllIn = true
+          }
           break
 
         case 'all-in':
@@ -398,9 +411,19 @@ import {
               this.gameState.lastRaiseSize = raiseAmount
             }
             this.gameState.currentBet = newTotal
+            // All-in raise reopens action
+            this.resetOthersHasActed(player.id)
           }
           break
       }
+    }
+
+    private resetOthersHasActed(excludePlayerId: string): void {
+      this.gameState.players.forEach(p => {
+        if (p.id !== excludePlayerId && !p.isFolded && !p.isAllIn && !p.disconnected) {
+          p.hasActed = false
+        }
+      })
     }
 
     // ========================================
@@ -564,11 +587,46 @@ import {
         evaluation: evaluateHand([...player.holeCards, ...this.gameState.communityCards])
       }))
 
-      // Calculate side pots (complex algorithm for all-in situations)
-      this.calculateSidePots(playersInHand)
+      // Debug: print what the engine thinks each player has (always log)
+      try {
+        // eslint-disable-next-line no-console
+        console.group('[Showdown] Hand evaluations')
+        handEvaluations.forEach(({ player, evaluation }) => {
+          // eslint-disable-next-line no-console
+          console.log(`${player.name} (${player.id})`, {
+            rank: evaluation.rank,
+            value: evaluation.value,
+            description: evaluation.description,
+            holeCards: player.holeCards,
+            board: this.gameState.communityCards
+          })
+        })
+        // eslint-disable-next-line no-console
+        console.groupEnd()
+      } catch {}
+
+      // Calculate side pots only if there are differing total contributions
+      const contribs = this.gameState.players.map(p => p.totalBet)
+      const distinct = Array.from(new Set(contribs)).sort((a,b)=>a-b)
+      if (distinct.length > 1) {
+        this.calculateSidePots(playersInHand)
+      } else {
+        // Single main pot
+        this.gameState.sidePots = [{
+          amount: this.gameState.pot,
+          eligiblePlayers: playersInHand.map(p => p.id),
+          isMain: true
+        }]
+      }
 
       // Award each pot to the appropriate winner(s)
       this.awardPots(handEvaluations)
+
+      // Debug: print aggregated winners
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[Showdown] Winners', this.gameState.winners)
+      } catch {}
     }
 
     private calculateSidePots(players: Player[]): void {
@@ -588,6 +646,12 @@ import {
 
         // Contributors to this layer: any player who contributed at least 'level'
         const contributorsCount = allContrib.filter(c => c.amount >= level).length
+        // If only one player has contributed to this level, this portion is an uncalled bet
+        // and should NOT form a pot layer
+        if (contributorsCount <= 1) {
+          prevLevel = level
+          continue
+        }
         const amount = layerSize * contributorsCount
 
         // Eligible winners are players still in hand who contributed at least 'level'
@@ -604,20 +668,25 @@ import {
         prevLevel = level
       }
 
-      // Ensure side pots add up to the actual pot (guard against any drift)
+      // Handle uncalled bet: if computed side pots are less than the recorded pot,
+      // refund the uncalled amount to the highest contributor and reduce the pot.
       const computedTotal = sidePots.reduce((sum, pot) => sum + pot.amount, 0)
       const potDiff = this.gameState.pot - computedTotal
       if (potDiff > 0) {
-        if (sidePots.length === 0) {
-          // Create a main pot including everyone still in hand
-          sidePots.push({
-            amount: potDiff,
-            eligiblePlayers: players.map(p => p.id),
-            isMain: true
-          })
+        // Find the single highest contributor
+        const highest = allContrib.reduce((acc, c) => (c.amount > acc.amount ? c : acc), allContrib[0])
+        const topCount = allContrib.filter(c => c.amount === highest.amount).length
+        if (topCount === 1) {
+          const bettor = this.gameState.players.find(p => p.id === highest.id)
+          if (bettor) bettor.chips += potDiff
+          this.gameState.pot -= potDiff
         } else {
-          // Add remainder to the last side pot
-          sidePots[sidePots.length - 1].amount += potDiff
+          // If multiple share the top contribution, distribute the remainder to the earliest side pot
+          if (sidePots.length === 0) {
+            sidePots.push({ amount: potDiff, eligiblePlayers: players.map(p => p.id), isMain: true })
+          } else {
+            sidePots[sidePots.length - 1].amount += potDiff
+          }
         }
       }
 
@@ -631,6 +700,7 @@ import {
     }
 
     private awardPots(handEvaluations: { player: Player; evaluation: HandEvaluation }[]): void {
+      const aggregate: Record<string, number> = {}
       for (const sidePot of this.gameState.sidePots) {
         // Find eligible players for this pot
         const eligibleEvaluations = handEvaluations.filter(
@@ -650,12 +720,8 @@ import {
           const payout = base + (idx === 0 ? remainder : 0)
           winner.player.chips += payout
 
-          // Track winners for display
-          this.gameState.winners.push({
-            playerId: winner.player.id,
-            amount: payout,
-            hand: winner.evaluation
-          })
+          // Aggregate amounts per player for display
+          aggregate[winner.player.id] = (aggregate[winner.player.id] || 0) + payout
         })
 
         // Optional debug logging to verify outcomes during development
@@ -670,6 +736,17 @@ import {
           } catch {}
         }
       }
+
+      // Replace winners list with aggregated totals
+      this.gameState.winners = Object.entries(aggregate).map(([playerId, amount]) => ({
+        playerId,
+        amount,
+        // Use the player's actual evaluation for display
+        hand: ((): HandEvaluation => {
+          const player = this.gameState.players.find(p => p.id === playerId)!
+          return evaluateHand([...player.holeCards, ...this.gameState.communityCards])
+        })()
+      }))
     }
 
     private prepareNextHand(): void {
@@ -729,10 +806,11 @@ import {
     }
 
     private advanceToNextPlayer(): void {
-      const playersStillInHand = this.getPlayersStillInHand().filter(p => !p.isAllIn)
+      const playersStillEligible = this.getPlayersStillInHand().filter(p => !p.isAllIn)
       
-      if (playersStillInHand.length <= 1) {
-        return // No more players to act
+      // If nobody is eligible to act, caller should have handled showdown progression
+      if (playersStillEligible.length === 0) {
+        return
       }
       
       let nextPlayerIndex = this.gameState.activePlayerIndex
@@ -753,10 +831,12 @@ import {
     // ========================================
 
     public getGameState(): Readonly<GameState> {
+      this.ensureProgressIfStalled()
       return { ...this.gameState }
     }
 
     public getCurrentPlayer(): Player | null {
+      this.ensureProgressIfStalled()
       return this.gameState.players[this.gameState.activePlayerIndex] || null
     }
 
@@ -773,29 +853,51 @@ import {
 
       const actions: PlayerAction['type'][] = ['fold']
       const callAmount = this.getCallAmount(player)
+      const eligibleCount = this.getPlayersStillInHand().filter(p => !p.isAllIn).length
 
       if (callAmount === 0) {
         actions.push('check')
-      } else {
-        if (player.chips >= callAmount) {
-          actions.push('call')
+      } else if (player.chips >= callAmount) {
+        actions.push('call')
+      }
+
+      if (eligibleCount > 1) {
+        if (this.gameState.currentBet === 0) {
+          if (player.chips + player.currentBet >= this.gameState.blinds.big) actions.push('bet')
+        } else {
+          const minRaiseTotal = this.gameState.currentBet + Math.max(this.gameState.lastRaiseSize, this.gameState.blinds.big)
+          if (player.chips + player.currentBet >= minRaiseTotal) actions.push('raise')
         }
       }
 
-      if (this.gameState.currentBet === 0) {
-        // Opening bet
-        if (player.chips + player.currentBet >= this.gameState.blinds.big) actions.push('bet')
-      } else {
-        // Raise requires at least currentBet + lastRaiseSize
-        const minRaiseTotal = this.gameState.currentBet + this.gameState.lastRaiseSize
-        if (player.chips + player.currentBet >= minRaiseTotal) actions.push('raise')
-      }
-
-      if (player.chips > 0) {
-        actions.push('all-in')
-      }
-
+      if (player.chips > 0) actions.push('all-in')
       return actions
+    }
+
+    // If the active player cannot act or nobody can act, auto-progress
+    private ensureProgressIfStalled(): void {
+      if (this.gameState.isHandComplete) return
+      const current = this.gameState.players[this.gameState.activePlayerIndex]
+      const eligibleCount = this.getPlayersStillInHand().filter(p => !p.isAllIn).length
+
+      if (eligibleCount === 0) {
+        // Fast-forward through streets to showdown
+        while (!this.gameState.isHandComplete && this.gameState.currentBettingRound !== BettingRound.SHOWDOWN) {
+          this.advanceBettingRound()
+        }
+        if (!this.gameState.isHandComplete) this.completeHand()
+        return
+      }
+
+      // If current can't act, jump to next eligible
+      if (!current || current.isFolded || current.isAllIn || current.disconnected) {
+        this.advanceToNextPlayer()
+      }
+
+      // If betting round is already complete, advance
+      if (this.isBettingRoundComplete()) {
+        this.advanceBettingRound()
+      }
     }
   }
   

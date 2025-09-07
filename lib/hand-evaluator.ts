@@ -24,14 +24,13 @@ export function evaluateHand(cards: Card[]): HandEvaluation {
   if (cards.length < 5) {
     throw new Error(`Need at least 5 cards to evaluate, got ${cards.length}`)
   }
-  
+
   if (cards.length === 5) {
-    // Exactly 5 cards - evaluate directly
     return evaluateFiveCards(cards)
   }
-  
-  // More than 5 cards - find best combination
-  return findBestHand(cards)
+
+  // Robust 7-card evaluator (works for 6 or 7 cards)
+  return evaluateSevenCards(cards)
 }
 
 /**
@@ -55,6 +54,178 @@ function findBestHand(cards: Card[]): HandEvaluation {
   }
   
   return bestHand
+}
+
+// ========================================
+// SEVEN-CARD (6-7) EVALUATION
+// ========================================
+
+function evaluateSevenCards(cards: Card[]): HandEvaluation {
+  // Build rank and suit maps
+  const bySuit: Record<Card['suit'], Card[]> = {
+    hearts: [], diamonds: [], clubs: [], spades: []
+  }
+  const rankCounts: Record<number, number> = {}
+  const rankToCards: Record<number, Card[]> = {}
+
+  for (const c of cards) {
+    bySuit[c.suit].push(c)
+    const v = rankToValue(c.rank)
+    rankCounts[v] = (rankCounts[v] || 0) + 1
+    ;(rankToCards[v] ||= []).push(c)
+  }
+
+  const uniqueValuesAsc = Object.keys(rankCounts).map(n => parseInt(n, 10)).sort((a,b)=>a-b)
+  const uniqueValuesDesc = [...uniqueValuesAsc].sort((a,b)=>b-a)
+
+  // Straight helper (values array should be unique)
+  const findStraightHigh = (valuesAsc: number[]): number | null => {
+    if (valuesAsc.length < 5) return null
+    // Handle wheel A-2-3-4-5
+    const withWheel = valuesAsc.includes(14) ? [1, ...valuesAsc] : [...valuesAsc]
+    let run = 1
+    let bestHigh: number | null = null
+    for (let i = 1; i < withWheel.length; i++) {
+      if (withWheel[i] === withWheel[i-1] + 1) {
+        run++
+        if (run >= 5) bestHigh = withWheel[i]
+      } else if (withWheel[i] !== withWheel[i-1]) {
+        run = 1
+      }
+    }
+    return bestHigh
+  }
+
+  // 1) Straight Flush
+  let flushSuit: Card['suit'] | null = null
+  for (const s of Object.keys(bySuit) as Card['suit'][] ) {
+    if (bySuit[s].length >= 5) {
+      flushSuit = s
+      break
+    }
+  }
+  if (flushSuit) {
+    const valsAsc = Array.from(new Set(bySuit[flushSuit].map(c => rankToValue(c.rank)))).sort((a,b)=>a-b)
+    const sfHigh = findStraightHigh(valsAsc)
+    if (sfHigh) {
+      const isRoyal = sfHigh === 14
+      const category = isRoyal ? HandRank.ROYAL_FLUSH : HandRank.STRAIGHT_FLUSH
+      const rankBase = category * 1_000_000_000
+      const encode = (arr: number[], width: number) => arr.slice(0, width).reduce((acc, v) => acc * 15 + v, 0)
+      return {
+        rank: category,
+        value: rankBase + encode([sfHigh], 1),
+        description: isRoyal ? 'Royal Flush' : `Straight Flush, ${sfHigh} high`,
+        cards: []
+      }
+    }
+  }
+
+  // 2) Four of a kind
+  const quad = uniqueValuesDesc.find(v => rankCounts[v] === 4)
+  if (quad) {
+    const kicker = uniqueValuesDesc.find(v => v !== quad) || 2
+    return {
+      rank: HandRank.FOUR_OF_A_KIND,
+      value: HandRank.FOUR_OF_A_KIND * 1_000_000_000 + (quad * 15 + kicker),
+      description: `Four of a Kind, ${quad}s`,
+      cards: []
+    }
+  }
+
+  // 3) Full house (best trips + best pair from remaining)
+  const tripsDesc = uniqueValuesDesc.filter(v => rankCounts[v] >= 3)
+  const pairsDesc = uniqueValuesDesc.filter(v => rankCounts[v] >= 2)
+  if (tripsDesc.length >= 1) {
+    const bestTrips = tripsDesc[0]
+    const pairCandidates = pairsDesc.filter(v => v !== bestTrips)
+    if (pairCandidates.length >= 1) {
+      const bestPair = pairCandidates[0]
+      return {
+        rank: HandRank.FULL_HOUSE,
+        value: HandRank.FULL_HOUSE * 1_000_000_000 + (bestTrips * 15 + bestPair),
+        description: `Full House, ${bestTrips}s over ${bestPair}s`,
+        cards: []
+      }
+    }
+    // Two sets of trips: use second as pair
+    if (tripsDesc.length >= 2) {
+      const secondTrips = tripsDesc[1]
+      return {
+        rank: HandRank.FULL_HOUSE,
+        value: HandRank.FULL_HOUSE * 1_000_000_000 + (bestTrips * 15 + secondTrips),
+        description: `Full House, ${bestTrips}s over ${secondTrips}s`,
+        cards: []
+      }
+    }
+  }
+
+  // 4) Flush
+  if (flushSuit) {
+    const top5 = Array.from(new Set(bySuit[flushSuit].map(c => rankToValue(c.rank)))).sort((a,b)=>b-a).slice(0,5)
+    return {
+      rank: HandRank.FLUSH,
+      value: HandRank.FLUSH * 1_000_000_000 + top5.reduce((acc, v) => acc * 15 + v, 0),
+      description: `Flush, ${top5[0]} high`,
+      cards: []
+    }
+  }
+
+  // 5) Straight
+  const straightHigh = findStraightHigh(uniqueValuesAsc)
+  if (straightHigh) {
+    return {
+      rank: HandRank.STRAIGHT,
+      value: HandRank.STRAIGHT * 1_000_000_000 + straightHigh,
+      description: `Straight, ${straightHigh} high`,
+      cards: []
+    }
+  }
+
+  // 6) Three of a kind
+  if (tripsDesc.length >= 1) {
+    const t = tripsDesc[0]
+    const kickers = uniqueValuesDesc.filter(v => v !== t).slice(0,2)
+    return {
+      rank: HandRank.THREE_OF_A_KIND,
+      value: HandRank.THREE_OF_A_KIND * 1_000_000_000 + [t, (kickers[0]||0), (kickers[1]||0)].reduce((acc, v) => acc * 15 + v, 0),
+      description: `Three of a Kind, ${t}s`,
+      cards: []
+    }
+  }
+
+  // 7) Two Pair
+  if (pairsDesc.length >= 2) {
+    const [p1, p2] = pairsDesc.slice(0,2)
+    const kicker = uniqueValuesDesc.find(v => v !== p1 && v !== p2) || 0
+    return {
+      rank: HandRank.TWO_PAIR,
+      value: HandRank.TWO_PAIR * 1_000_000_000 + [p1, p2, kicker].reduce((acc, v) => acc * 15 + v, 0),
+      description: `Two Pair, ${p1}s and ${p2}s`,
+      cards: []
+    }
+  }
+
+  // 8) One Pair
+  if (pairsDesc.length === 1) {
+    const p = pairsDesc[0]
+    const kickers = uniqueValuesDesc.filter(v => v !== p).slice(0,3)
+    return {
+      rank: HandRank.PAIR,
+      value: HandRank.PAIR * 1_000_000_000 + [p, (kickers[0]||0), (kickers[1]||0), (kickers[2]||0)].reduce((acc, v) => acc * 15 + v, 0),
+      description: `Pair of ${p}s`,
+      cards: []
+    }
+  }
+
+  // 9) High Card
+  const highs = uniqueValuesDesc.slice(0,5)
+  return {
+    rank: HandRank.HIGH_CARD,
+    value: HandRank.HIGH_CARD * 1_000_000_000 + highs.reduce((acc, v) => acc * 15 + v, 0),
+    description: `High Card, ${highs[0]}`,
+    cards: []
+  }
 }
 
 /**
@@ -147,6 +318,9 @@ function evaluateFiveCards(cards: Card[]): HandEvaluation {
 // INDIVIDUAL HAND TYPE CHECKERS
 // ========================================
 
+const CATEGORY_BASE = 1_000_000_000
+const encode = (arr: number[]): number => arr.reduce((acc, v) => acc * 15 + v, 0)
+
 function checkRoyalFlush(cards: Card[]): HandEvaluation | null {
   const isFlush = cards.every(card => card.suit === cards[0].suit)
   if (!isFlush) return null
@@ -159,7 +333,7 @@ function checkRoyalFlush(cards: Card[]): HandEvaluation | null {
   
   return {
     rank: HandRank.ROYAL_FLUSH,
-    value: 100000000, // Highest possible value
+    value: HandRank.ROYAL_FLUSH * CATEGORY_BASE + 14,
     description: `Royal Flush in ${cards[0].suit}`,
     cards: [...cards]
   }
@@ -172,12 +346,12 @@ function checkStraightFlush(cards: Card[]): HandEvaluation | null {
   const straight = checkStraight(cards)
   if (!straight) return null
   
-  // Derive high card from straight evaluation to handle wheel (A-2-3-4-5) correctly
-  const straightHigh = straight.value - 50000000
+  // Derive high card from straight evaluation
+  const straightHigh = straight.value - HandRank.STRAIGHT * CATEGORY_BASE
   
   return {
     rank: HandRank.STRAIGHT_FLUSH,
-    value: 90000000 + straightHigh,
+    value: HandRank.STRAIGHT_FLUSH * CATEGORY_BASE + straightHigh,
     description: straight.description.replace('Straight', 'Straight Flush'),
     cards: [...cards]
   }
@@ -193,7 +367,10 @@ function checkFourOfAKind(cards: Card[]): HandEvaluation | null {
   
   return {
     rank: HandRank.FOUR_OF_A_KIND,
-    value: 80000000 + rankToValue(quadRank as Card['rank']) * 1000 + rankToValue(kicker as Card['rank']),
+    value: HandRank.FOUR_OF_A_KIND * CATEGORY_BASE + encode([
+      rankToValue(quadRank as Card['rank']),
+      rankToValue(kicker as Card['rank'])
+    ]),
     description: `Four of a Kind, ${quadRank}s`,
     cards: [...cards]
   }
@@ -208,7 +385,10 @@ function checkFullHouse(cards: Card[]): HandEvaluation | null {
   
   return {
     rank: HandRank.FULL_HOUSE,
-    value: 70000000 + rankToValue(tripleRank as Card['rank']) * 1000 + rankToValue(pairRank as Card['rank']),
+    value: HandRank.FULL_HOUSE * CATEGORY_BASE + encode([
+      rankToValue(tripleRank as Card['rank']),
+      rankToValue(pairRank as Card['rank'])
+    ]),
     description: `Full House, ${tripleRank}s over ${pairRank}s`,
     cards: [...cards]
   }
@@ -223,14 +403,10 @@ function checkFlush(cards: Card[]): HandEvaluation | null {
   
   // Value based on all 5 cards (highest to lowest)
   const values = cards.map(card => rankToValue(card.rank)).sort((a, b) => b - a)
-  let value = 60000000
-  for (let i = 0; i < values.length; i++) {
-    value += values[i] * Math.pow(100, 4 - i)
-  }
   
   return {
     rank: HandRank.FLUSH,
-    value,
+    value: HandRank.FLUSH * CATEGORY_BASE + encode(values),
     description: `Flush, ${cards[cards.length - 1].rank} high`,
     cards: [...cards]
   }
@@ -251,7 +427,7 @@ function checkStraight(cards: Card[]): HandEvaluation | null {
   if (isStraight) {
     return {
       rank: HandRank.STRAIGHT,
-      value: 50000000 + values[values.length - 1],
+      value: HandRank.STRAIGHT * CATEGORY_BASE + values[values.length - 1],
       description: `Straight, ${cards[cards.length - 1].rank} high`,
       cards: [...cards]
     }
@@ -264,7 +440,7 @@ function checkStraight(cards: Card[]): HandEvaluation | null {
   if (JSON.stringify(aceLowValues) === JSON.stringify(wheelValues)) {
     return {
       rank: HandRank.STRAIGHT,
-      value: 50000000 + 5, // 5-high straight
+      value: HandRank.STRAIGHT * CATEGORY_BASE + 5, // 5-high straight
       description: 'Straight, 5 high (wheel)',
       cards: [...cards]
     }
@@ -286,7 +462,9 @@ function checkThreeOfAKind(cards: Card[]): HandEvaluation | null {
   
   return {
     rank: HandRank.THREE_OF_A_KIND,
-    value: 40000000 + rankToValue(tripleRank as Card['rank']) * 10000 + kickers[0] * 100 + kickers[1],
+    value: HandRank.THREE_OF_A_KIND * CATEGORY_BASE + encode([
+      rankToValue(tripleRank as Card['rank']), kickers[0], kickers[1]
+    ]),
     description: `Three of a Kind, ${tripleRank}s`,
     cards: [...cards]
   }
@@ -303,7 +481,9 @@ function checkTwoPair(cards: Card[]): HandEvaluation | null {
   
   return {
     rank: HandRank.TWO_PAIR,
-    value: 30000000 + pairValues[0] * 10000 + pairValues[1] * 100 + rankToValue(kicker as Card['rank']),
+    value: HandRank.TWO_PAIR * CATEGORY_BASE + encode([
+      pairValues[0], pairValues[1], rankToValue(kicker as Card['rank'])
+    ]),
     description: `Two Pair, ${pairs[0]}s and ${pairs[1]}s`,
     cards: [...cards]
   }
@@ -322,8 +502,9 @@ function checkOnePair(cards: Card[]): HandEvaluation | null {
   
   return {
     rank: HandRank.PAIR,
-    value: 20000000 + rankToValue(pairRank as Card['rank']) * 1000000 + 
-           kickers[0] * 10000 + kickers[1] * 100 + kickers[2],
+    value: HandRank.PAIR * CATEGORY_BASE + encode([
+      rankToValue(pairRank as Card['rank']), kickers[0], kickers[1], kickers[2]
+    ]),
     description: `Pair of ${pairRank}s`,
     cards: [...cards]
   }
@@ -332,14 +513,9 @@ function checkOnePair(cards: Card[]): HandEvaluation | null {
 function checkHighCard(cards: Card[]): HandEvaluation {
   const values = cards.map(card => rankToValue(card.rank)).sort((a, b) => b - a)
   
-  let value = 10000000
-  for (let i = 0; i < values.length; i++) {
-    value += values[i] * Math.pow(100, 4 - i)
-  }
-  
   return {
     rank: HandRank.HIGH_CARD,
-    value,
+    value: HandRank.HIGH_CARD * CATEGORY_BASE + encode(values),
     description: `High Card, ${cards[cards.length - 1].rank}`,
     cards: [...cards]
   }

@@ -33,7 +33,7 @@ export function PokerTable({
   // Check if it's the current player's turn
   const isCurrentPlayerTurn = currentPlayerId === currentGamePlayer?.id
   
-  // Get valid actions for current player
+  // Get valid actions for current player (UI helper maintains parity with engine rules)
   const validActions: PlayerAction['type'][] = currentPlayer && isCurrentPlayerTurn 
     ? getValidActionsForPlayer(currentPlayer, gameState)
     : []
@@ -129,6 +129,8 @@ export function PokerTable({
                 currentBet={gameState.currentBet}
                 playerCurrentBet={currentPlayer.currentBet}
                 minimumBet={gameState.blinds.big}
+                lastRaiseSize={gameState.lastRaiseSize}
+                pot={gameState.pot}
                 validActions={validActions}
                 onAction={onPlayerAction}
                 disabled={gameState.isHandComplete}

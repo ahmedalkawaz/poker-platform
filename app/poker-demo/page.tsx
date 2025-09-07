@@ -340,8 +340,6 @@ export default function PokerDemoPage() {
         gameState={gameState}
         currentPlayerId={currentPlayerId}
         onPlayerAction={handlePlayerAction}
-        onJoinGame={handleJoinGame}
-        onLeaveGame={handleLeaveGame}
       />
 
       {/* Debug info (development only) */}

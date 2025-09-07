@@ -15,6 +15,8 @@ interface BettingControlsProps {
   currentBet: number
   playerCurrentBet: number
   minimumBet: number
+  lastRaiseSize: number
+  pot: number
   validActions: PlayerAction['type'][]
   
   // Callbacks
@@ -27,6 +29,8 @@ export function BettingControls({
   currentBet,
   playerCurrentBet,
   minimumBet,
+  lastRaiseSize,
+  pot,
   validActions,
   onAction,
   disabled = false
@@ -37,7 +41,20 @@ export function BettingControls({
   
   // Calculate amounts for display
   const callAmount = Math.max(0, currentBet - playerCurrentBet)
-  const maxBet = playerChips
+  const maxBet = playerChips + playerCurrentBet
+  const minRaiseTotal = currentBet > 0 ? currentBet + Math.max(lastRaiseSize, minimumBet) : minimumBet
+  const basePot = Math.max(pot, minimumBet)
+
+  const clampTotal = (targetTotal: number) => {
+    return Math.max(
+      currentBet === 0 ? minimumBet : minRaiseTotal,
+      Math.min(maxBet, targetTotal)
+    )
+  }
+
+  const halfPotTotal = clampTotal(Math.floor(basePot * 0.5))
+  const potTotal = clampTotal(basePot)
+  const twoPotTotal = clampTotal(basePot * 2)
   
   // Helper to check if action is valid
   const isActionValid = (actionType: PlayerAction['type']) => {
@@ -52,11 +69,11 @@ export function BettingControls({
   
   // Quick bet buttons (common bet sizes)
   const quickBetAmounts = [
-    { label: 'Min', value: minimumBet },
-    { label: '1/2 Pot', value: Math.floor((currentBet || minimumBet) * 0.5) },
-    { label: 'Pot', value: currentBet || minimumBet },
-    { label: '2x Pot', value: (currentBet || minimumBet) * 2 },
-  ].filter(bet => bet.value <= maxBet && bet.value >= minimumBet)
+    { label: 'Min', value: clampTotal(minRaiseTotal) },
+    { label: '1/2 Pot', value: halfPotTotal },
+    { label: 'Pot', value: potTotal },
+    { label: '2x Pot', value: twoPotTotal },
+  ].filter(bet => bet.value <= maxBet && bet.value >= (currentBet === 0 ? minimumBet : minRaiseTotal))
 
   if (disabled) {
     return (
@@ -71,6 +88,7 @@ export function BettingControls({
       {/* Player info */}
       <div className="flex justify-between items-center text-sm text-gray-600">
         <span>Your chips: ${playerChips}</span>
+        <span>Pot: ${pot}</span>
         {callAmount > 0 && <span>To call: ${callAmount}</span>}
       </div>
       
@@ -139,7 +157,9 @@ export function BettingControls({
                 key={bet.label}
                 onClick={() => {
                   const actionType = isActionValid('bet') ? 'bet' : 'raise'
-                  onAction({ type: actionType, amount: bet.value } as PlayerAction)
+                  const minTotal = actionType === 'bet' ? minimumBet : minRaiseTotal
+                  const total = Math.max(minTotal, bet.value)
+                  onAction({ type: actionType, amount: total } as PlayerAction)
                 }}
                 className="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm font-medium transition-colors duration-200"
               >
@@ -283,12 +303,14 @@ export function BettingHistory({ actions, maxActions = 5 }: BettingHistoryProps)
 
 interface PotDisplayProps {
   mainPot: number
-  sidePots?: Array<{ amount: number; eligiblePlayers: string[] }>
+  sidePots?: Array<{ amount: number; eligiblePlayers: string[]; isMain?: boolean }>
   isAnimating?: boolean
 }
 
 export function PotDisplay({ mainPot, sidePots = [], isAnimating = false }: PotDisplayProps) {
-  const totalPot = mainPot + sidePots.reduce((sum, pot) => sum + pot.amount, 0)
+  const totalFromSidePots = sidePots.reduce((sum, pot) => sum + pot.amount, 0)
+  // If side pots are present, they already represent the full pot breakdown
+  const totalPot = sidePots.length > 0 ? totalFromSidePots : mainPot
   
   return (
     <div className="text-center space-y-2">
@@ -308,14 +330,18 @@ export function PotDisplay({ mainPot, sidePots = [], isAnimating = false }: PotD
       {sidePots.length > 0 && (
         <div className="space-y-1">
           <div className="text-xs text-gray-600">
-            Main Pot: ${mainPot.toLocaleString()}
+            Main Pot: ${(
+              (sidePots.find(p => p.isMain) || sidePots[0]).amount
+            ).toLocaleString()}
           </div>
-          {sidePots.map((sidePot, index) => (
-            <div key={index} className="text-xs text-gray-600">
-              Side Pot {index + 1}: ${sidePot.amount.toLocaleString()} 
-              ({sidePot.eligiblePlayers.length} players)
-            </div>
-          ))}
+          {sidePots
+            .filter((sp, idx) => !(sp.isMain ?? idx === 0))
+            .map((sidePot, index) => (
+              <div key={index} className="text-xs text-gray-600">
+                Side Pot {index + 1}: ${sidePot.amount.toLocaleString()} 
+                ({sidePot.eligiblePlayers.length} players)
+              </div>
+            ))}
         </div>
       )}
     </div>
